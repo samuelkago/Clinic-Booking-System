@@ -296,14 +296,3 @@ Answer the following. Bullet points are fine.
 | Secrets not committed (`.env` / `.env.prod` gitignored) | Done |
 | AI reflection finalized | Done |
 | Git repository initialized | Done |
-
----
-
-## Interview talking points (quick)
-
-1. **Why FastAPI?** Fast validation (Pydantic), clear OpenAPI docs, good fit for a focused REST API.
-2. **Double booking?** Service validation + partial unique index + transaction; never trust a prior availability read alone.
-3. **Failed reschedule?** Validate new slot first; mutate only if valid; on conflict return `409` and leave original `start_at`.
-4. **Availability?** Generate 30-minute intervals from working hours for the date, drop booked starts and slots inside the lead window.
-5. **Transaction vs constraint?** Transaction = atomic unit of work; constraint = invariant the DB enforces even under concurrency.
-6. **Scale?** Derived slots fine for hundreds of doctors/day; add caching, indexes on `(doctor_id, start_at)`, later optional materialization or sharding by clinic.
