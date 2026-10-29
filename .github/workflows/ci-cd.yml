@@ -110,24 +110,3 @@ jobs:
 
       - name: Run Pytest suite
         run: pytest -v --tb=short
-
-  deploy:
-    name: Deploy
-    needs: test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Trigger Render deploy
-        env:
-          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-        run: |
-          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
-            echo "RENDER_DEPLOY_HOOK secret not set — skipping remote deploy."
-            echo "Add the Render Deploy Hook URL in GitHub → Settings → Secrets."
-            exit 0
-          fi
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
-          echo "Deploy hook triggered successfully."
