@@ -7,6 +7,11 @@ from app.models import AppointmentStatus, Doctor, Patient
 from app.services import booking as booking_service
 
 
+def _parse_dt(value: str) -> datetime:
+    """Parse API datetimes; CI may serialize as UTC (…Z) instead of +03:00."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def test_reschedule_moves_slot(
     client: TestClient,
     doctor: Doctor,
@@ -29,7 +34,7 @@ def test_reschedule_moves_slot(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["start_at"] == new_start.isoformat()
+    assert _parse_dt(body["start_at"]) == new_start
 
     # Original slot free again
     rebook = client.post(
