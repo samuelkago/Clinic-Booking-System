@@ -6,31 +6,35 @@ Implementation Engineer take-home — Savannah Informatics.
 
 ---
 
-## Section 1 — System design
+## SECTION 1 — SYSTEM DESIGN
 
 ### Scenario
 
-A small clinic with 5 doctors. Patients book **30-minute slots** online within each doctor's working hours, cancel with a reason, or reschedule. Once booked, a slot must not be available to others — including under concurrent requests.
+> We run a small clinic with 5 doctors. Patients need to book appointments online. Each doctor has set working hours and works in 30-minute slots. A patient should see which slots are free for a given doctor on a given day, pick one, and book it. Once booked, that slot must not be available to others. Patients should also be able to cancel. We're starting small but want to grow.
 
-### Architecture
+### Models and components identified
 
+```mermaid
+flowchart TB
+  Client["Client / API consumer"]
+  API["FastAPI<br/>routes · Pydantic schemas · validation"]
+  Service["Booking service<br/>working hours · slots · lifecycle"]
+  DB["PostgreSQL + SQLAlchemy<br/>transactions · partial unique index"]
+
+  Client -->|"HTTP + JSON"| API
+  API --> Service
+  Service --> DB
 ```
-Client / API consumer
-        ↓  HTTP + JSON
-FastAPI (routes · Pydantic schemas · validation)
-        ↓
-Booking service (working hours · slot rules · lifecycle)
-        ↓
-SQLAlchemy + PostgreSQL (transactions · partial unique index · persistence)
-```
 
-| Layer | Role |
+| Component | Role |
 | --- | --- |
 | `app/api/` | HTTP only — status codes and request/response |
 | `app/schemas/` | Pydantic validation and serialization |
 | `app/services/booking.py` | Business rules |
 | `app/models/` | Tables, FKs, partial unique index |
 | `tests/` | Booking behaviour against PostgreSQL |
+
+**Growth:** the schema is not hard-capped at 5 doctors (`is_active`, seeded hours per doctor). Scaling later means more instances behind a load balancer and the same Postgres constraints — not a rewrite of booking rules.
 
 ### Models
 
@@ -97,48 +101,74 @@ This index is appropriate because appointments are **fixed 30-minute aligned sta
 
 ---
 
-## Section 2 — API
+## SECTION 2 — API IMPLEMENTATION
 
-| Method | Path | Success |
+Stack: **FastAPI** + **PostgreSQL** + **SQLAlchemy** + **Alembic**. Code is split across `api/`, `schemas/`, `services/`, and `models/` (not a single file).
+
+### Required endpoints
+
+| Method | Path | Behaviour |
 | --- | --- | --- |
-| `POST` | `/appointments` | `201` |
-| `GET` | `/doctors/{id}/availability?date=YYYY-MM-DD` | `200` |
-| `PATCH` | `/appointments/{id}/cancel` | `200` |
-| `PATCH` | `/appointments/{id}/reschedule` | `200` |
-| `GET` | `/patients/{id}/appointments` | `200` (bonus) |
-| `GET` | `/doctors` | `200` (helper) |
-| `GET` | `/health` | `200` |
+| `POST` | `/appointments` | Book a slot — within working hours, not in the past / inside lead time, not already taken → `201` |
+| `GET` | `/doctors/{id}/availability?date=` | All free 30-minute slots for that doctor/day → `200` |
+| `PATCH` | `/appointments/{id}/cancel` | Cancel with a reason; slot free again; error if already cancelled → `200` / `409` |
+| `PATCH` | `/appointments/{id}/reschedule` | Move to a new validated slot; original freed; error if cancelled → `200` / `409` |
+
+### Bonus
+
+| Method | Path | Behaviour |
+| --- | --- | --- |
+| `GET` | `/patients/{id}/appointments` | Upcoming booked appointments, sorted by date |
+| — | — | Reject bookings (and hide slots) within **60 minutes** of now |
+
+### Helpers
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/` | `{"status":"ok"}` |
+| `GET` | `/health` | Liveness |
+| `GET` | `/doctors` | List seeded doctors |
+| `GET` | `/docs` | OpenAPI UI |
+
+### HTTP status codes
 
 | Status | When |
 | --- | --- |
 | `200` / `201` | Success |
-| `400` | Business-rule failure (outside hours, lead time, bad alignment) |
+| `400` | Business-rule failure (outside hours, lead time, bad alignment) — meaningful `detail` message |
 | `404` | Doctor / patient / appointment missing |
 | `409` | Slot taken, already cancelled, or invalid state transition |
 | `422` | Pydantic schema validation (FastAPI default) |
 
-Interactive docs: `http://localhost:8000/docs`
+### Tests
 
-### Examples
+`tests/` covers booking, double-book, cancel, reschedule, availability, and concurrent booking against PostgreSQL (`pytest`).
+
+### Examples (production)
+
+Base URL: `https://clinic-booking-system-7j1l.onrender.com`
 
 ```bash
-# Book
-curl -s -X POST http://localhost:8000/appointments \
-  -H 'Content-Type: application/json' \
-  -d '{"doctor_id":1,"patient_id":1,"start_at":"2026-10-28T10:00:00+03:00"}'
+# Root
+curl -s https://clinic-booking-system-7j1l.onrender.com/
 
 # Availability
-curl -s "http://localhost:8000/doctors/1/availability?date=2026-10-28"
+curl -s "https://clinic-booking-system-7j1l.onrender.com/doctors/1/availability?date=2026-10-30"
+
+# Book
+curl -s -X POST https://clinic-booking-system-7j1l.onrender.com/appointments \
+  -H 'Content-Type: application/json' \
+  -d '{"doctor_id":1,"patient_id":1,"start_at":"2026-10-30T10:00:00+03:00"}'
 
 # Cancel
-curl -s -X PATCH http://localhost:8000/appointments/1/cancel \
+curl -s -X PATCH https://clinic-booking-system-7j1l.onrender.com/appointments/1/cancel \
   -H 'Content-Type: application/json' \
   -d '{"reason":"Patient requested cancellation"}'
 
 # Reschedule
-curl -s -X PATCH http://localhost:8000/appointments/1/reschedule \
+curl -s -X PATCH https://clinic-booking-system-7j1l.onrender.com/appointments/1/reschedule \
   -H 'Content-Type: application/json' \
-  -d '{"start_at":"2026-10-28T11:30:00+03:00"}'
+  -d '{"start_at":"2026-10-30T11:30:00+03:00"}'
 ```
 
 ---
@@ -173,35 +203,81 @@ Tests create/use `clinic_booking_test` on the same Postgres server.
 
 ---
 
-## Section 3 — Deployment & CI/CD
+## SECTION 3 — DEPLOYMENT & CI/CD
 
-**Public URL:** _add after deploy (e.g. Render)_
+### Public URL
 
-**CI:** `.github/workflows/ci-cd.yml`
+**Live API:** [https://clinic-booking-system-7j1l.onrender.com/](https://clinic-booking-system-7j1l.onrender.com/)
 
-| Trigger | Action |
+Quick checks: [`/`](https://clinic-booking-system-7j1l.onrender.com/), [`/health`](https://clinic-booking-system-7j1l.onrender.com/health), [`/docs`](https://clinic-booking-system-7j1l.onrender.com/docs), [`/doctors`](https://clinic-booking-system-7j1l.onrender.com/doctors)
+
+### Cloud provider
+
+- **Host:** [Render](https://render.com)
+- **Web service:** Docker image from this repo (`Dockerfile` → `scripts/start.sh`)
+- **Database:** Render PostgreSQL (connected via `DATABASE_URL`)
+- **On boot:** `alembic upgrade head` then `python -m scripts.seed`, then Uvicorn  
+  (needed because Render free compute has no web shell for one-off migrations)
+
+### Which branch triggers a deployment, and how?
+
+| Item | Detail |
 | --- | --- |
-| Pull request → `main` | Postgres service · Alembic · Pytest |
-| Push / merge → `main` | Same tests; **deploy job still stubbed** — wire Render/Railway/Fly + secrets |
+| **Deploy branch** | `main` |
+| **How** | Render is connected to the GitHub repo with **auto-deploy on `main`**. When a PR is **merged into `main`**, Render builds and deploys the new commit. |
+| **CI vs CD** | GitHub Actions runs **Setup → Migrate → Test** on every PR (and on pushes to `main`). Deploy itself is handled by **Render auto-deploy**, not a separate Actions deploy job. |
 
-Checklist for Section 3:
+Flow:
 
-- [ ] GitHub remote + public or shared repo
-- [ ] Cloud Postgres + API deploy
-- [ ] Migrations on deploy
-- [ ] Auto-deploy on merge to `main` enabled and verified
-- [ ] Document public URL here
+```text
+feature branch → open PR → GitHub Actions (Setup / Migrate / Test)
+                              ↓ (all green)
+                         merge into main
+                              ↓
+                    Render auto-deploys production
+```
+
+### What the CI/CD pipeline does
+
+Workflow file: [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml)
+
+| Stage | When | What it does |
+| --- | --- | --- |
+| **Setup** | Every PR + push to `main` | Checkout, Python 3.12, install deps, confirm app imports |
+| **Migrate** | After Setup | Spin up Postgres service, run `alembic upgrade head` |
+| **Test** | After Migrate | Fresh Postgres, migrations, full Pytest suite |
+| **Deploy** | Merge / push to `main` | Render watches `main` and deploys automatically |
 
 ---
 
-## Section 4 — AI reflection
 
-_Replace with your honest answers before submission._
+## SECTION 4 — AI REFLECTION
 
-1. **What I used AI for** — scaffolding FastAPI layout, models, booking validation, Alembic, pytest fixtures, and README wording.
-2. **Where AI improved the work** — reviewing race conditions and recommending a partial unique index in addition to application checks.
-3. **Where AI was wrong** — early suggestion to `commit()` inside the service broke transactional tests; commits moved to the API layer.
-4. **Decisions without AI** — derived slots vs slot table; keeping cancelled rows for audit while freeing the slot via the partial index.
+Answer the following. Bullet points are fine.
+
+### 1. What did you use AI for across the four sections?
+
+- **Section 1 (design):** Drafting models, business rules, trade-offs, and the concurrency story for the README.
+- **Section 2 (API):** Scaffolding the FastAPI layout, SQLAlchemy models, booking service validation, Alembic migration, and Pytest fixtures/tests.
+- **Section 3 (deploy/CI):** Dockerfile/start script so migrations run on boot (Render free has no shell), and splitting GitHub Actions into Setup / Migrate / Test stages.
+- **Section 4 (this reflection):** Structuring honest examples from what actually broke or improved during implementation.
+
+### 2. Give one example where an AI suggestion improved your work. What did you prompt it with?
+
+- **Prompt (paraphrased):** how to stop two patients booking the same 30-minute slot at the same time, beyond checking availability in Python.
+- **What improved:** AI suggested a PostgreSQL **partial unique index** on `(doctor_id, start_at) WHERE status = 'booked'`, on top of application validation.
+- **Why it mattered:** cancelled slots can be rebooked, and concurrent inserts cannot both succeed — something a plain “check then insert” path cannot guarantee.
+
+### 3. Give one example where AI output was wrong or incomplete and how you caught it.
+
+- **Wrong / incomplete:** early booking code `commit()`’d inside the service layer; that broke transactional Pytest fixtures (nested savepoints) and made cancel-then-rebook tests flaky/inconsistent.
+- **Also:** a test compared `start_at` as ISO strings (`+03:00` vs CI’s `Z` UTC). Same instant, different string — CI failed while local passed.
+- **How I caught it:** running the suite locally and on GitHub Actions, then fixing commits to live in the API layer and comparing **datetime instants** instead of raw strings.
+
+### 4. Name two decisions you made without AI. Why did you trust your own judgment there?
+
+1. **Derived slots instead of storing every 30-minute row** — for five doctors this is simpler to reason about and stays correct when working hours change; I did not want a calendar table to maintain.
+2. **Run `alembic upgrade` + seed on container startup** — Render’s free plan has no shell/SSH; shipping a start script was the practical way to get schema + seed data without upgrading compute.
 
 ---
 
@@ -214,12 +290,12 @@ _Replace with your honest answers before submission._
 | DB constraint prevents double booking | Done (`uq_active_doctor_slot`) |
 | Cancel / reschedule behaviour | Done |
 | Automated tests for main booking rules | Done (incl. concurrent booking) |
-| Public deployment + URL documented | **Todo** |
-| PRs run tests (GitHub Actions) | Workflow ready; needs git remote |
-| Merge to `main` auto-deploys | **Todo** (stub in workflow) |
-| Secrets not committed (`.env` gitignored) | Done |
-| AI reflection finalized | **Todo** (edit Section 4) |
-| Git repository initialized | **Todo** (`git init` / push) |
+| Public deployment + URL documented | Done — https://clinic-booking-system-7j1l.onrender.com/ |
+| PRs run tests (GitHub Actions) | Done (Setup / Migrate / Test) |
+| Merge to `main` auto-deploys | Done (Render auto-deploy on `main`) |
+| Secrets not committed (`.env` / `.env.prod` gitignored) | Done |
+| AI reflection finalized | Done |
+| Git repository initialized | Done |
 
 ---
 
