@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN chmod +x scripts/start.sh
+
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Migrate + seed on boot (needed on Render free — no shell), then start API.
+# Render injects $PORT; locally defaults to 8000.
+CMD ["./scripts/start.sh"]
