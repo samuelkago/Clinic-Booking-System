@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   pull_request:
@@ -6,10 +6,41 @@ on:
   push:
     branches: [main, master]
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
+env:
+  PYTHON_VERSION: "3.12"
+  DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/clinic_booking
+  TIMEZONE: Africa/Nairobi
+  MIN_BOOKING_LEAD_MINUTES: "60"
+  SLOT_MINUTES: "30"
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Confirm app imports
+        run: python -c "from app.main import app; print(app.title)"
+
+  migrate:
+    name: Migrate
+    needs: setup
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16-alpine
@@ -24,38 +55,79 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-
-    env:
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/clinic_booking
-      TIMEZONE: Africa/Nairobi
-      MIN_BOOKING_LEAD_MINUTES: "60"
-      SLOT_MINUTES: "30"
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run migrations
+      - name: Apply Alembic migrations
         run: alembic upgrade head
 
-      - name: Run tests
-        run: pytest -q
+      - name: Confirm migration version
+        run: alembic current
 
-  # Deploy job — wire to your provider (Render/Railway/Fly) after credentials are set.
-  # Uncomment and fill in when ready for Section 3.
-  # deploy:
-  #   needs: test
-  #   if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Deploy
-  #       run: echo "Configure deploy command for your cloud provider"
+  test:
+    name: Test
+    needs: migrate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: clinic_booking
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d clinic_booking"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply Alembic migrations
+        run: alembic upgrade head
+
+      - name: Run Pytest suite
+        run: pytest -v --tb=short
+
+  deploy:
+    name: Deploy
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK secret not set — skipping remote deploy."
+            echo "Add the Render Deploy Hook URL in GitHub → Settings → Secrets."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Deploy hook triggered successfully."
